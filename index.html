@@ -1,0 +1,804 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Open City</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #08111b;
+        --panel: rgba(7, 15, 24, 0.78);
+        --accent: #38bdf8;
+        --danger: #fb7185;
+        --good: #4ade80;
+        --road: #243447;
+        --lane: #f8fafc;
+        --block: #0f766e;
+        --block-2: #14532d;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: "Inter", "Segoe UI", sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 35%),
+          linear-gradient(180deg, #020617 0%, #07111c 100%);
+        color: #e2e8f0;
+      }
+
+      .shell {
+        width: min(96vw, 1100px);
+        padding: 16px;
+      }
+
+      .hud {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        padding: 12px 16px;
+        border: 1px solid rgba(148, 163, 184, 0.18);
+        background: var(--panel);
+        backdrop-filter: blur(12px);
+        border-radius: 18px;
+        box-shadow: 0 18px 70px rgba(0, 0, 0, 0.35);
+      }
+
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+      }
+
+      .stat {
+        display: grid;
+        gap: 2px;
+      }
+
+      .label {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: #94a3b8;
+      }
+
+      .value {
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .value.heat {
+        color: #fde68a;
+      }
+
+      .value.health {
+        color: var(--good);
+      }
+
+      .value.alert {
+        color: var(--danger);
+      }
+
+      .instructions {
+        font-size: 14px;
+        line-height: 1.5;
+        color: #cbd5e1;
+        max-width: 540px;
+      }
+
+      canvas {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        display: block;
+        background: #0f172a;
+        border-radius: 24px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+      }
+
+      .footer {
+        margin-top: 10px;
+        text-align: right;
+        color: #64748b;
+        font-size: 12px;
+      }
+
+      @media (max-width: 780px) {
+        .hud {
+          padding: 10px 12px;
+        }
+
+        .value {
+          font-size: 18px;
+        }
+
+        .instructions {
+          font-size: 13px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hud">
+        <div class="stats">
+          <div class="stat">
+            <span class="label">Score</span>
+            <span class="value" id="score">0</span>
+          </div>
+          <div class="stat">
+            <span class="label">Health</span>
+            <span class="value health" id="health">100</span>
+          </div>
+          <div class="stat">
+            <span class="label">Heat</span>
+            <span class="value heat" id="heat">☆</span>
+          </div>
+          <div class="stat">
+            <span class="label">Status</span>
+            <span class="value alert" id="status">Cruising</span>
+          </div>
+        </div>
+        <div class="instructions">
+          WASD / 矢印で移動、<b>Shift</b> でダッシュ、<b>Enter</b> で乗車 / 降車、<b>Space</b> でアクション。<br />
+          市民を拾ってドロップするとスコア獲得。警察にぶつかったり混乱を起こすとヒート上昇。
+        </div>
+      </section>
+      <canvas id="game" width="1280" height="720" aria-label="Mini open city game"></canvas>
+      <div class="footer">1ファイル完結の GTA 風トップダウンミニゲーム</div>
+    </main>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+
+      const scoreEl = document.getElementById("score");
+      const healthEl = document.getElementById("health");
+      const heatEl = document.getElementById("heat");
+      const statusEl = document.getElementById("status");
+
+      const world = {
+        width: 2600,
+        height: 1800,
+        blocks: [],
+        sidewalks: [],
+        passengers: [],
+        police: [],
+        cars: [],
+        particles: [],
+        packagesDelivered: 0,
+      };
+
+      const keys = new Set();
+      const rand = (min, max) => Math.random() * (max - min) + min;
+      const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+      const distance = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+      const player = {
+        x: world.width / 2,
+        y: world.height / 2,
+        vx: 0,
+        vy: 0,
+        radius: 14,
+        speed: 240,
+        sprintBoost: 1.55,
+        color: "#38bdf8",
+        inCar: true,
+        carrying: null,
+        score: 0,
+        health: 100,
+        heat: 0,
+        heading: 0,
+        actionCooldown: 0,
+        blink: 0,
+      };
+
+      const playerCar = {
+        x: player.x,
+        y: player.y,
+        vx: 0,
+        vy: 0,
+        angle: 0,
+        width: 42,
+        height: 24,
+        accel: 460,
+        maxSpeed: 420,
+        drag: 0.96,
+        turnSpeed: 2.8,
+        color: "#f97316",
+        occupied: true,
+        integrity: 100,
+      };
+
+      function createCity() {
+        world.blocks.length = 0;
+        world.sidewalks.length = 0;
+        const cols = 4;
+        const rows = 3;
+        const cellW = world.width / cols;
+        const cellH = world.height / rows;
+
+        for (let row = 0; row < rows; row += 1) {
+          for (let col = 0; col < cols; col += 1) {
+            const x = col * cellW + 90;
+            const y = row * cellH + 90;
+            const w = cellW - 180;
+            const h = cellH - 180;
+            world.blocks.push({ x, y, w, h, tone: (row + col) % 2 === 0 ? "#0f766e" : "#14532d" });
+            world.sidewalks.push(
+              { x: x - 28, y: y - 28, w: w + 56, h: 24 },
+              { x: x - 28, y: y + h + 4, w: w + 56, h: 24 },
+              { x: x - 28, y, w: 24, h },
+              { x: x + w + 4, y, w: 24, h }
+            );
+          }
+        }
+      }
+
+      function spawnPassengers() {
+        world.passengers = Array.from({ length: 10 }, () => ({
+          x: rand(150, world.width - 150),
+          y: rand(150, world.height - 150),
+          targetX: rand(150, world.width - 150),
+          targetY: rand(150, world.height - 150),
+          radius: 10,
+          color: `hsl(${Math.floor(rand(0, 360))} 85% 70%)`,
+          picked: false,
+          rescued: false,
+          wanderTimer: rand(1, 4),
+          vx: rand(-30, 30),
+          vy: rand(-30, 30),
+        }));
+      }
+
+      function spawnTraffic() {
+        world.cars = Array.from({ length: 8 }, (_, i) => ({
+          x: rand(200, world.width - 200),
+          y: 260 + i * 180,
+          vx: i % 2 === 0 ? rand(80, 150) : rand(-150, -80),
+          vy: 0,
+          angle: i % 2 === 0 ? 0 : Math.PI,
+          width: 40,
+          height: 22,
+          color: i % 3 === 0 ? "#22c55e" : i % 3 === 1 ? "#a855f7" : "#eab308",
+        }));
+      }
+
+      function spawnPolice() {
+        world.police = Array.from({ length: 4 }, (_, i) => ({
+          x: 240 + i * 500,
+          y: 120 + (i % 2) * 1450,
+          vx: 0,
+          vy: 0,
+          angle: 0,
+          width: 46,
+          height: 24,
+          color: "#e2e8f0",
+          sirenPhase: rand(0, Math.PI * 2),
+        }));
+      }
+
+      function resetGame() {
+        createCity();
+        spawnPassengers();
+        spawnTraffic();
+        spawnPolice();
+        player.x = world.width / 2;
+        player.y = world.height / 2;
+        player.vx = 0;
+        player.vy = 0;
+        player.score = 0;
+        player.health = 100;
+        player.heat = 0;
+        player.inCar = true;
+        player.carrying = null;
+        player.actionCooldown = 0;
+        playerCar.x = player.x;
+        playerCar.y = player.y;
+        playerCar.vx = 0;
+        playerCar.vy = 0;
+        playerCar.angle = 0;
+        playerCar.integrity = 100;
+        playerCar.occupied = true;
+      }
+
+      function rectCircleCollision(circle, rect) {
+        const closestX = clamp(circle.x, rect.x, rect.x + rect.w);
+        const closestY = clamp(circle.y, rect.y, rect.y + rect.h);
+        const dx = circle.x - closestX;
+        const dy = circle.y - closestY;
+        return dx * dx + dy * dy < circle.radius * circle.radius;
+      }
+
+      function carHitsBlock(car, block) {
+        return car.x + car.width / 2 > block.x &&
+          car.x - car.width / 2 < block.x + block.w &&
+          car.y + car.height / 2 > block.y &&
+          car.y - car.height / 2 < block.y + block.h;
+      }
+
+      function emitParticles(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          world.particles.push({
+            x,
+            y,
+            vx: rand(-180, 180),
+            vy: rand(-180, 180),
+            life: rand(0.2, 0.55),
+            maxLife: rand(0.2, 0.55),
+            color,
+          });
+        }
+      }
+
+      function increaseHeat(amount) {
+        player.heat = clamp(player.heat + amount, 0, 5);
+      }
+
+      function healOverTime(dt) {
+        if (player.heat <= 0 && player.health < 100) {
+          player.health = clamp(player.health + dt * 2.8, 0, 100);
+        }
+      }
+
+      function handlePlayerOnFoot(dt) {
+        let inputX = 0;
+        let inputY = 0;
+        if (keys.has("arrowup") || keys.has("w")) inputY -= 1;
+        if (keys.has("arrowdown") || keys.has("s")) inputY += 1;
+        if (keys.has("arrowleft") || keys.has("a")) inputX -= 1;
+        if (keys.has("arrowright") || keys.has("d")) inputX += 1;
+        const boost = keys.has("shift") ? player.sprintBoost : 1;
+        const length = Math.hypot(inputX, inputY) || 1;
+        player.vx = (inputX / length) * player.speed * boost;
+        player.vy = (inputY / length) * player.speed * boost;
+        player.x = clamp(player.x + player.vx * dt, player.radius, world.width - player.radius);
+        player.y = clamp(player.y + player.vy * dt, player.radius, world.height - player.radius);
+        if (player.vx || player.vy) {
+          player.heading = Math.atan2(player.vy, player.vx);
+        }
+
+        for (const block of world.blocks) {
+          if (rectCircleCollision(player, block)) {
+            if (player.x < block.x) player.x = block.x - player.radius;
+            if (player.x > block.x + block.w) player.x = block.x + block.w + player.radius;
+            if (player.y < block.y) player.y = block.y - player.radius;
+            if (player.y > block.y + block.h) player.y = block.y + block.h + player.radius;
+          }
+        }
+      }
+
+      function handlePlayerCar(dt) {
+        const accelerating = keys.has("arrowup") || keys.has("w");
+        const braking = keys.has("arrowdown") || keys.has("s");
+        const left = keys.has("arrowleft") || keys.has("a");
+        const right = keys.has("arrowright") || keys.has("d");
+        const forward = { x: Math.cos(playerCar.angle), y: Math.sin(playerCar.angle) };
+        const speed = Math.hypot(playerCar.vx, playerCar.vy);
+
+        if (accelerating) {
+          playerCar.vx += forward.x * playerCar.accel * dt;
+          playerCar.vy += forward.y * playerCar.accel * dt;
+        }
+        if (braking) {
+          playerCar.vx -= forward.x * playerCar.accel * 0.7 * dt;
+          playerCar.vy -= forward.y * playerCar.accel * 0.7 * dt;
+        }
+        if (left) playerCar.angle -= playerCar.turnSpeed * dt * (0.45 + speed / playerCar.maxSpeed);
+        if (right) playerCar.angle += playerCar.turnSpeed * dt * (0.45 + speed / playerCar.maxSpeed);
+
+        playerCar.vx *= playerCar.drag;
+        playerCar.vy *= playerCar.drag;
+
+        const currentSpeed = Math.hypot(playerCar.vx, playerCar.vy);
+        if (currentSpeed > playerCar.maxSpeed) {
+          playerCar.vx = (playerCar.vx / currentSpeed) * playerCar.maxSpeed;
+          playerCar.vy = (playerCar.vy / currentSpeed) * playerCar.maxSpeed;
+        }
+
+        playerCar.x = clamp(playerCar.x + playerCar.vx * dt, 20, world.width - 20);
+        playerCar.y = clamp(playerCar.y + playerCar.vy * dt, 20, world.height - 20);
+        player.x = playerCar.x;
+        player.y = playerCar.y;
+        player.heading = playerCar.angle;
+
+        for (const block of world.blocks) {
+          if (carHitsBlock(playerCar, block)) {
+            playerCar.vx *= -0.22;
+            playerCar.vy *= -0.22;
+            playerCar.x -= Math.cos(playerCar.angle) * 12;
+            playerCar.y -= Math.sin(playerCar.angle) * 12;
+            player.health = clamp(player.health - 10, 0, 100);
+            increaseHeat(0.4);
+            emitParticles(playerCar.x, playerCar.y, "#fca5a5", 14);
+          }
+        }
+      }
+
+      function updatePassengers(dt) {
+        for (const npc of world.passengers) {
+          if (npc.rescued) continue;
+          if (npc.picked) {
+            npc.x = player.x + Math.cos(player.heading + Math.PI / 2) * 26;
+            npc.y = player.y + Math.sin(player.heading + Math.PI / 2) * 26;
+            continue;
+          }
+
+          npc.wanderTimer -= dt;
+          if (npc.wanderTimer <= 0) {
+            npc.wanderTimer = rand(1.2, 3.5);
+            npc.vx = rand(-45, 45);
+            npc.vy = rand(-45, 45);
+          }
+          npc.x = clamp(npc.x + npc.vx * dt, 50, world.width - 50);
+          npc.y = clamp(npc.y + npc.vy * dt, 50, world.height - 50);
+
+          for (const block of world.blocks) {
+            if (rectCircleCollision(npc, block)) {
+              npc.vx *= -1;
+              npc.vy *= -1;
+              npc.x += npc.vx * dt * 2;
+              npc.y += npc.vy * dt * 2;
+            }
+          }
+        }
+      }
+
+      function updateTraffic(dt) {
+        for (const car of world.cars) {
+          car.x += car.vx * dt;
+          if (car.x < 80 || car.x > world.width - 80) {
+            car.vx *= -1;
+            car.angle = car.vx > 0 ? 0 : Math.PI;
+          }
+
+          if (player.inCar && distance(car, playerCar) < 38) {
+            player.health = clamp(player.health - 12 * dt, 0, 100);
+            increaseHeat(0.08 * dt);
+            emitParticles((car.x + playerCar.x) / 2, (car.y + playerCar.y) / 2, "#fde68a", 3);
+          }
+        }
+      }
+
+      function updatePolice(dt) {
+        for (const cop of world.police) {
+          const target = player.inCar ? playerCar : player;
+          const dx = target.x - cop.x;
+          const dy = target.y - cop.y;
+          const angle = Math.atan2(dy, dx);
+          cop.angle = angle;
+          const pursuit = 95 + player.heat * 75;
+          cop.vx = Math.cos(angle) * pursuit;
+          cop.vy = Math.sin(angle) * pursuit;
+          if (player.heat <= 0.05) {
+            cop.vx *= 0.35;
+            cop.vy *= 0.35;
+          }
+          cop.x = clamp(cop.x + cop.vx * dt, 20, world.width - 20);
+          cop.y = clamp(cop.y + cop.vy * dt, 20, world.height - 20);
+          cop.sirenPhase += dt * 8;
+
+          if (distance(cop, target) < 44) {
+            player.health = clamp(player.health - 18 * dt, 0, 100);
+            increaseHeat(0.12 * dt);
+            player.blink = 0.12;
+          }
+        }
+
+        if (player.heat > 0) {
+          player.heat = clamp(player.heat - dt * (player.inCar ? 0.035 : 0.06), 0, 5);
+        }
+      }
+
+      function action() {
+        if (player.actionCooldown > 0) return;
+        player.actionCooldown = 0.25;
+
+        if (player.inCar) {
+          const hitPassenger = world.passengers.find((npc) => !npc.picked && !npc.rescued && distance(npc, playerCar) < 42);
+          if (hitPassenger) {
+            hitPassenger.picked = true;
+            player.carrying = hitPassenger;
+            player.score += 150;
+            increaseHeat(0.2);
+            emitParticles(hitPassenger.x, hitPassenger.y, hitPassenger.color, 12);
+            return;
+          }
+        } else {
+          const nearbyPassenger = world.passengers.find((npc) => !npc.picked && !npc.rescued && distance(npc, player) < 34);
+          if (nearbyPassenger && !player.carrying) {
+            nearbyPassenger.picked = true;
+            player.carrying = nearbyPassenger;
+            statusEl.textContent = "Passenger picked up";
+            return;
+          }
+        }
+
+        if (player.carrying) {
+          const npc = player.carrying;
+          npc.picked = false;
+          const dropZoneDistance = Math.hypot(npc.targetX - player.x, npc.targetY - player.y);
+          npc.x = player.x + Math.cos(player.heading) * 30;
+          npc.y = player.y + Math.sin(player.heading) * 30;
+          if (dropZoneDistance < 100) {
+            npc.rescued = true;
+            player.score += 600 + Math.round((5 - player.heat) * 80);
+            player.health = clamp(player.health + 15, 0, 100);
+            increaseHeat(-0.8);
+            emitParticles(npc.targetX, npc.targetY, "#4ade80", 22);
+            statusEl.textContent = "Drop-off complete!";
+          } else {
+            increaseHeat(0.12);
+            statusEl.textContent = "Dropped passenger";
+          }
+          player.carrying = null;
+          return;
+        }
+
+        increaseHeat(0.18);
+        emitParticles(player.x, player.y, "#7dd3fc", 8);
+      }
+
+      function toggleVehicle() {
+        if (player.actionCooldown > 0) return;
+        player.actionCooldown = 0.25;
+
+        if (player.inCar) {
+          player.inCar = false;
+          playerCar.occupied = false;
+          player.x = playerCar.x + Math.cos(playerCar.angle + Math.PI / 2) * 28;
+          player.y = playerCar.y + Math.sin(playerCar.angle + Math.PI / 2) * 28;
+          statusEl.textContent = "On foot";
+          return;
+        }
+
+        if (distance(player, playerCar) < 46) {
+          player.inCar = true;
+          playerCar.occupied = true;
+          playerCar.x = player.x;
+          playerCar.y = player.y;
+          statusEl.textContent = "Driving";
+        }
+      }
+
+      function updateStatus() {
+        const alivePassengers = world.passengers.filter((npc) => !npc.rescued).length;
+        const currentStatus = player.health <= 0
+          ? "Wasted"
+          : player.inCar
+            ? player.carrying ? "Passenger onboard" : "Cruising"
+            : player.carrying ? "Escorting" : "On foot";
+
+        statusEl.textContent = alivePassengers === 0 && player.health > 0 ? "City cleared!" : currentStatus;
+        scoreEl.textContent = Math.floor(player.score);
+        healthEl.textContent = Math.ceil(player.health);
+        heatEl.textContent = player.heat <= 0.2 ? "☆" : "★".repeat(Math.max(1, Math.ceil(player.heat)));
+      }
+
+      function updateParticles(dt) {
+        world.particles = world.particles.filter((particle) => {
+          particle.life -= dt;
+          particle.x += particle.vx * dt;
+          particle.y += particle.vy * dt;
+          return particle.life > 0;
+        });
+      }
+
+      function update(dt) {
+        if (player.health <= 0) {
+          if (keys.has("r")) resetGame();
+          updateStatus();
+          return;
+        }
+
+        player.actionCooldown = Math.max(0, player.actionCooldown - dt);
+        player.blink = Math.max(0, player.blink - dt);
+
+        if (player.inCar) {
+          handlePlayerCar(dt);
+        } else {
+          handlePlayerOnFoot(dt);
+        }
+
+        updatePassengers(dt);
+        updateTraffic(dt);
+        updatePolice(dt);
+        updateParticles(dt);
+        healOverTime(dt);
+
+        if (player.carrying && distance(player.carrying, { x: player.carrying.targetX, y: player.carrying.targetY }) < 100) {
+          statusEl.textContent = "Deliver now!";
+        }
+
+        if (world.passengers.every((npc) => npc.rescued)) {
+          player.score += dt * 40;
+        }
+
+        updateStatus();
+      }
+
+      function drawRoads(camera) {
+        ctx.fillStyle = "#243447";
+        ctx.fillRect(-camera.x, 0 - camera.y, world.width, world.height);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.85)";
+        ctx.lineWidth = 4;
+        ctx.setLineDash([18, 18]);
+
+        const verticalRoads = [world.width / 4, world.width / 2, (world.width * 3) / 4];
+        const horizontalRoads = [world.height / 3, (world.height * 2) / 3];
+
+        for (const x of verticalRoads) {
+          ctx.beginPath();
+          ctx.moveTo(x - camera.x, -camera.y);
+          ctx.lineTo(x - camera.x, world.height - camera.y);
+          ctx.stroke();
+        }
+        for (const y of horizontalRoads) {
+          ctx.beginPath();
+          ctx.moveTo(-camera.x, y - camera.y);
+          ctx.lineTo(world.width - camera.x, y - camera.y);
+          ctx.stroke();
+        }
+
+        ctx.setLineDash([]);
+      }
+
+      function drawBlocks(camera) {
+        for (const block of world.blocks) {
+          ctx.fillStyle = block.tone;
+          ctx.fillRect(block.x - camera.x, block.y - camera.y, block.w, block.h);
+          ctx.fillStyle = "rgba(255,255,255,0.08)";
+          for (let y = block.y + 16; y < block.y + block.h - 16; y += 34) {
+            for (let x = block.x + 16; x < block.x + block.w - 16; x += 34) {
+              ctx.fillRect(x - camera.x, y - camera.y, 16, 16);
+            }
+          }
+        }
+
+        for (const walk of world.sidewalks) {
+          ctx.fillStyle = "#94a3b8";
+          ctx.fillRect(walk.x - camera.x, walk.y - camera.y, walk.w, walk.h);
+        }
+      }
+
+      function drawDestination(camera, npc) {
+        if (npc.rescued) return;
+        ctx.beginPath();
+        ctx.arc(npc.targetX - camera.x, npc.targetY - camera.y, 18, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(74, 222, 128, 0.18)";
+        ctx.fill();
+        ctx.strokeStyle = "#4ade80";
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      }
+
+      function drawPassenger(camera, npc) {
+        if (npc.rescued) return;
+        drawDestination(camera, npc);
+        ctx.beginPath();
+        ctx.arc(npc.x - camera.x, npc.y - camera.y, npc.radius, 0, Math.PI * 2);
+        ctx.fillStyle = npc.color;
+        ctx.fill();
+        ctx.fillStyle = "rgba(15, 23, 42, 0.7)";
+        ctx.fillRect(npc.x - camera.x - 10, npc.y - camera.y + 12, 20, 4);
+      }
+
+      function drawCar(camera, car, isPlayer = false) {
+        ctx.save();
+        ctx.translate(car.x - camera.x, car.y - camera.y);
+        ctx.rotate(car.angle);
+        ctx.fillStyle = car.color;
+        ctx.fillRect(-car.width / 2, -car.height / 2, car.width, car.height);
+        ctx.fillStyle = "rgba(15,23,42,0.9)";
+        ctx.fillRect(-car.width / 6, -car.height / 2 + 3, car.width / 2, car.height - 6);
+        if (isPlayer) {
+          ctx.strokeStyle = "#fff7ed";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(-car.width / 2, -car.height / 2, car.width, car.height);
+        }
+        ctx.restore();
+      }
+
+      function drawPolice(camera, cop) {
+        drawCar(camera, cop);
+        const siren = Math.sin(cop.sirenPhase) > 0 ? "#60a5fa" : "#fb7185";
+        ctx.fillStyle = siren;
+        ctx.fillRect(cop.x - camera.x - 8, cop.y - camera.y - 16, 16, 5);
+      }
+
+      function drawPlayer(camera) {
+        if (player.inCar) {
+          drawCar(camera, playerCar, true);
+          return;
+        }
+
+        ctx.save();
+        ctx.translate(player.x - camera.x, player.y - camera.y);
+        ctx.rotate(player.heading);
+        ctx.fillStyle = player.blink > 0 ? "#fca5a5" : player.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, player.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#e0f2fe";
+        ctx.fillRect(0, -3, 16, 6);
+        ctx.restore();
+      }
+
+      function drawParticles(camera) {
+        for (const particle of world.particles) {
+          ctx.globalAlpha = particle.life / particle.maxLife;
+          ctx.fillStyle = particle.color;
+          ctx.fillRect(particle.x - camera.x, particle.y - camera.y, 4, 4);
+          ctx.globalAlpha = 1;
+        }
+      }
+
+      function render() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        const camera = {
+          x: clamp((player.inCar ? playerCar.x : player.x) - canvas.width / 2, 0, world.width - canvas.width),
+          y: clamp((player.inCar ? playerCar.y : player.y) - canvas.height / 2, 0, world.height - canvas.height),
+        };
+
+        drawRoads(camera);
+        drawBlocks(camera);
+
+        for (const car of world.cars) drawCar(camera, car);
+        for (const npc of world.passengers) drawPassenger(camera, npc);
+        for (const cop of world.police) drawPolice(camera, cop);
+        drawPlayer(camera);
+        drawParticles(camera);
+
+        if (player.health <= 0) {
+          ctx.fillStyle = "rgba(2, 6, 23, 0.72)";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#fecaca";
+          ctx.font = "bold 64px Inter, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("WASTED", canvas.width / 2, canvas.height / 2 - 20);
+          ctx.fillStyle = "#e2e8f0";
+          ctx.font = "24px Inter, sans-serif";
+          ctx.fillText("R キーでリスタート", canvas.width / 2, canvas.height / 2 + 36);
+        }
+      }
+
+      let last = performance.now();
+      function frame(now) {
+        const dt = Math.min((now - last) / 1000, 1 / 30);
+        last = now;
+        update(dt);
+        render();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener("keydown", (event) => {
+        const key = event.key.toLowerCase();
+        keys.add(key);
+        if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
+          event.preventDefault();
+        }
+        if (key === " ") action();
+        if (key === "enter") toggleVehicle();
+      });
+
+      window.addEventListener("keyup", (event) => {
+        keys.delete(event.key.toLowerCase());
+      });
+
+      resetGame();
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
