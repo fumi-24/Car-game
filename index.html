@@ -1,0 +1,760 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Open City 3D</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --panel: rgba(6, 13, 22, 0.8);
+        --line: rgba(148, 163, 184, 0.2);
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --accent: #38bdf8;
+        --success: #4ade80;
+        --danger: #fb7185;
+        --warn: #facc15;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+        background:
+          radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 30%),
+          linear-gradient(180deg, #020617 0%, #07111c 100%);
+        color: var(--text);
+      }
+
+      .shell {
+        width: min(96vw, 1180px);
+        padding: 16px;
+      }
+
+      .hud {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 14px;
+        margin-bottom: 12px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: var(--panel);
+        backdrop-filter: blur(14px);
+        box-shadow: 0 24px 90px rgba(0, 0, 0, 0.35);
+      }
+
+      .stats {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+      }
+
+      .stat {
+        display: grid;
+        gap: 4px;
+      }
+
+      .label {
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      .value {
+        font-size: 22px;
+        font-weight: 800;
+      }
+
+      .health { color: var(--success); }
+      .heat { color: var(--warn); }
+      .status { color: var(--danger); }
+
+      .help {
+        max-width: 600px;
+        font-size: 14px;
+        line-height: 1.6;
+        color: #cbd5e1;
+      }
+
+      canvas {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        display: block;
+        border-radius: 24px;
+        border: 1px solid rgba(148, 163, 184, 0.22);
+        box-shadow: 0 28px 90px rgba(0, 0, 0, 0.4);
+        background: #020617;
+      }
+
+      .footer {
+        margin-top: 10px;
+        font-size: 12px;
+        color: #64748b;
+        text-align: right;
+      }
+
+      @media (max-width: 820px) {
+        .value { font-size: 18px; }
+        .help { font-size: 13px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hud">
+        <div class="stats">
+          <div class="stat">
+            <span class="label">Score</span>
+            <span class="value" id="score">0</span>
+          </div>
+          <div class="stat">
+            <span class="label">Health</span>
+            <span class="value health" id="health">100</span>
+          </div>
+          <div class="stat">
+            <span class="label">Heat</span>
+            <span class="value heat" id="heat">☆</span>
+          </div>
+          <div class="stat">
+            <span class="label">Mission</span>
+            <span class="value status" id="status">Pickup target</span>
+          </div>
+        </div>
+        <div class="help">
+          <b>W / S</b> で加速・減速、<b>A / D</b> でステア、<b>Shift</b> でブースト、<b>Space</b> でクラクション。<br />
+          3D の街を走って乗客を拾い、緑の目的地に届けてスコア獲得。派手に走ると警察車両が追ってきます。<br />
+          <b>M</b> でミニマップ、<b>R</b> でゲームオーバー後に再開。
+        </div>
+      </section>
+      <canvas id="game" width="1280" height="720" aria-label="3D mini open city driving game"></canvas>
+      <div class="footer">1ファイル完結 / 疑似3Dレイキャスト方式の GTA 風ドライブゲーム</div>
+    </main>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+
+      const scoreEl = document.getElementById("score");
+      const healthEl = document.getElementById("health");
+      const heatEl = document.getElementById("heat");
+      const statusEl = document.getElementById("status");
+
+      const keys = new Set();
+      const rand = (min, max) => Math.random() * (max - min) + min;
+      const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+      const TAU = Math.PI * 2;
+      const CELL = 64;
+      const FOV = Math.PI / 3;
+      const MAX_DEPTH = CELL * 14;
+      const SHOW_RAYS = false;
+
+      const cityMap = [
+        "11111111111111111111",
+        "10001000100010001001",
+        "10001000100010001001",
+        "10000000000000000001",
+        "11101110111011101111",
+        "10000000000000000001",
+        "10001000100010001001",
+        "10001000100010001001",
+        "10000000000000000001",
+        "11101110111011101111",
+        "10000000000000000001",
+        "10001000100010001001",
+        "10001000100010001001",
+        "10000000000000000001",
+        "11101110111011101111",
+        "10000000000000000001",
+        "10001000100010001001",
+        "10001000100010001001",
+        "10000000000000000001",
+        "11111111111111111111",
+      ];
+
+      const routes = [
+        [1.5, 3.5], [5.5, 3.5], [9.5, 3.5], [13.5, 3.5], [17.5, 3.5],
+        [17.5, 8.5], [17.5, 13.5], [13.5, 13.5], [9.5, 13.5], [5.5, 13.5],
+        [1.5, 13.5], [1.5, 8.5],
+      ].map(([x, y]) => ({ x: x * CELL, y: y * CELL }));
+
+      const state = {
+        showMap: true,
+        flash: 0,
+        particles: [],
+        pickupsCompleted: 0,
+        objective: null,
+      };
+
+      const player = {
+        x: 2.5 * CELL,
+        y: 3.5 * CELL,
+        angle: 0,
+        speed: 0,
+        score: 0,
+        health: 100,
+        heat: 0,
+        boost: 1,
+      };
+
+      const police = [];
+      const traffic = [];
+      const pedestrians = [];
+      let currentPickup = null;
+      let destination = null;
+
+      function worldCell(x, y) {
+        const col = Math.floor(x / CELL);
+        const row = Math.floor(y / CELL);
+        return cityMap[row]?.[col] ?? "1";
+      }
+
+      function isWall(x, y) {
+        return worldCell(x, y) === "1";
+      }
+
+      function canMoveTo(x, y, radius = 14) {
+        return ![
+          [x - radius, y - radius],
+          [x + radius, y - radius],
+          [x - radius, y + radius],
+          [x + radius, y + radius],
+        ].some(([px, py]) => isWall(px, py));
+      }
+
+      function resetMission() {
+        const pickupNode = routes[Math.floor(rand(0, routes.length))];
+        let destinationNode = routes[Math.floor(rand(0, routes.length))];
+        while (destinationNode === pickupNode) {
+          destinationNode = routes[Math.floor(rand(0, routes.length))];
+        }
+
+        currentPickup = {
+          x: pickupNode.x + rand(-12, 12),
+          y: pickupNode.y + rand(-12, 12),
+          radius: 18,
+          color: `hsl(${Math.floor(rand(180, 330))} 90% 68%)`,
+          active: true,
+        };
+
+        destination = {
+          x: destinationNode.x,
+          y: destinationNode.y,
+          radius: 24,
+          active: false,
+        };
+      }
+
+      function spawnWorld() {
+        police.length = 0;
+        traffic.length = 0;
+        pedestrians.length = 0;
+
+        for (let i = 0; i < 5; i += 1) {
+          traffic.push({
+            routeIndex: (i * 2) % routes.length,
+            targetIndex: (i * 2 + 1) % routes.length,
+            x: routes[(i * 2) % routes.length].x,
+            y: routes[(i * 2) % routes.length].y,
+            speed: rand(55, 90),
+            size: 18,
+            color: ["#f97316", "#22c55e", "#eab308", "#a855f7", "#fb7185"][i % 5],
+          });
+        }
+
+        for (let i = 0; i < 3; i += 1) {
+          police.push({
+            x: routes[(i * 4 + 3) % routes.length].x,
+            y: routes[(i * 4 + 3) % routes.length].y,
+            angle: 0,
+            speed: 0,
+            size: 20,
+            siren: rand(0, TAU),
+          });
+        }
+
+        for (let i = 0; i < 12; i += 1) {
+          const node = routes[i % routes.length];
+          pedestrians.push({
+            x: node.x + rand(-28, 28),
+            y: node.y + rand(-28, 28),
+            phase: rand(0, TAU),
+            color: `hsl(${Math.floor(rand(0, 360))} 80% 72%)`,
+            radius: 9,
+          });
+        }
+      }
+
+      function resetGame() {
+        player.x = 2.5 * CELL;
+        player.y = 3.5 * CELL;
+        player.angle = 0;
+        player.speed = 0;
+        player.score = 0;
+        player.health = 100;
+        player.heat = 0;
+        state.flash = 0;
+        state.particles = [];
+        state.pickupsCompleted = 0;
+        spawnWorld();
+        resetMission();
+      }
+
+      function emitParticles(x, y, color, count) {
+        for (let i = 0; i < count; i += 1) {
+          state.particles.push({
+            x,
+            y,
+            vx: rand(-120, 120),
+            vy: rand(-120, 120),
+            life: rand(0.35, 0.8),
+            maxLife: rand(0.35, 0.8),
+            color,
+          });
+        }
+      }
+
+      function drivePlayer(dt) {
+        const accelerating = keys.has("w") || keys.has("arrowup");
+        const braking = keys.has("s") || keys.has("arrowdown");
+        const left = keys.has("a") || keys.has("arrowleft");
+        const right = keys.has("d") || keys.has("arrowright");
+        const boosting = keys.has("shift");
+
+        const accel = boosting ? 220 : 170;
+        const maxSpeed = boosting ? 260 : 200;
+        const turnFactor = clamp(Math.abs(player.speed) / 140, 0.35, 1.3);
+
+        if (accelerating) player.speed += accel * dt;
+        if (braking) player.speed -= accel * dt;
+        player.speed *= accelerating || braking ? 0.992 : 0.965;
+        player.speed = clamp(player.speed, -100, maxSpeed);
+
+        if (left) player.angle -= 1.8 * dt * turnFactor * Math.sign(player.speed || 1);
+        if (right) player.angle += 1.8 * dt * turnFactor * Math.sign(player.speed || 1);
+        player.angle = (player.angle + TAU) % TAU;
+
+        const nextX = player.x + Math.cos(player.angle) * player.speed * dt;
+        const nextY = player.y + Math.sin(player.angle) * player.speed * dt;
+
+        if (canMoveTo(nextX, player.y, 15)) {
+          player.x = nextX;
+        } else {
+          player.speed *= -0.2;
+          player.health = clamp(player.health - 9, 0, 100);
+          player.heat = clamp(player.heat + 0.35, 0, 5);
+          state.flash = 0.12;
+          emitParticles(player.x, player.y, "#fca5a5", 10);
+        }
+
+        if (canMoveTo(player.x, nextY, 15)) {
+          player.y = nextY;
+        } else {
+          player.speed *= -0.2;
+        }
+
+        if (boosting && Math.abs(player.speed) > 120) {
+          player.heat = clamp(player.heat + dt * 0.22, 0, 5);
+        }
+      }
+
+      function updateTraffic(dt) {
+        for (const car of traffic) {
+          const target = routes[car.targetIndex];
+          const dx = target.x - car.x;
+          const dy = target.y - car.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < 8) {
+            car.routeIndex = car.targetIndex;
+            car.targetIndex = (car.targetIndex + 1) % routes.length;
+          } else {
+            car.x += (dx / dist) * car.speed * dt;
+            car.y += (dy / dist) * car.speed * dt;
+          }
+
+          const hitDist = Math.hypot(player.x - car.x, player.y - car.y);
+          if (hitDist < 26) {
+            player.health = clamp(player.health - 18 * dt, 0, 100);
+            player.heat = clamp(player.heat + 0.45 * dt, 0, 5);
+            player.speed *= 0.92;
+            state.flash = 0.08;
+          }
+        }
+      }
+
+      function updatePolice(dt) {
+        for (const cop of police) {
+          cop.siren += dt * 10;
+          const dx = player.x - cop.x;
+          const dy = player.y - cop.y;
+          const dist = Math.hypot(dx, dy);
+
+          if (player.heat > 0.2) {
+            const chaseSpeed = 105 + player.heat * 28;
+            cop.angle = Math.atan2(dy, dx);
+            cop.x += Math.cos(cop.angle) * chaseSpeed * dt;
+            cop.y += Math.sin(cop.angle) * chaseSpeed * dt;
+          } else {
+            const driftTarget = routes[Math.floor((cop.siren * 0.25) % routes.length)];
+            const ddx = driftTarget.x - cop.x;
+            const ddy = driftTarget.y - cop.y;
+            const dd = Math.hypot(ddx, ddy) || 1;
+            cop.x += (ddx / dd) * 48 * dt;
+            cop.y += (ddy / dd) * 48 * dt;
+            cop.angle = Math.atan2(ddy, ddx);
+          }
+
+          if (dist < 28) {
+            player.health = clamp(player.health - 24 * dt, 0, 100);
+            player.heat = clamp(player.heat + 0.5 * dt, 0, 5);
+            player.speed *= 0.9;
+            state.flash = 0.15;
+          }
+        }
+
+        player.heat = clamp(player.heat - dt * 0.05, 0, 5);
+      }
+
+      function updatePedestrians(dt) {
+        for (const ped of pedestrians) {
+          ped.phase += dt;
+          ped.x += Math.cos(ped.phase) * 10 * dt;
+          ped.y += Math.sin(ped.phase * 1.3) * 10 * dt;
+          if (isWall(ped.x, ped.y)) {
+            ped.phase += Math.PI;
+          }
+          if (Math.hypot(player.x - ped.x, player.y - ped.y) < 20) {
+            player.heat = clamp(player.heat + 0.8 * dt, 0, 5);
+          }
+        }
+      }
+
+      function updateMission(dt) {
+        if (currentPickup?.active && Math.hypot(player.x - currentPickup.x, player.y - currentPickup.y) < 28) {
+          currentPickup.active = false;
+          destination.active = true;
+          player.score += 150;
+          player.heat = clamp(player.heat + 0.25, 0, 5);
+          emitParticles(currentPickup.x, currentPickup.y, currentPickup.color, 14);
+        }
+
+        if (destination?.active && Math.hypot(player.x - destination.x, player.y - destination.y) < 34) {
+          destination.active = false;
+          player.score += 650 + Math.round((5 - player.heat) * 70);
+          player.health = clamp(player.health + 12, 0, 100);
+          player.heat = clamp(player.heat - 1, 0, 5);
+          state.pickupsCompleted += 1;
+          emitParticles(destination.x, destination.y, "#4ade80", 26);
+          resetMission();
+        }
+
+        if (!currentPickup?.active && destination?.active) {
+          player.score += dt * 6;
+        }
+      }
+
+      function updateParticles(dt) {
+        state.particles = state.particles.filter((p) => {
+          p.life -= dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          return p.life > 0;
+        });
+      }
+
+      function updateStatus() {
+        const mission = player.health <= 0
+          ? "WASTED"
+          : currentPickup?.active
+            ? "Pickup target"
+            : destination?.active
+              ? "Deliver passenger"
+              : "Free roam";
+
+        scoreEl.textContent = Math.floor(player.score);
+        healthEl.textContent = Math.ceil(player.health);
+        heatEl.textContent = player.heat <= 0.2 ? "☆" : "★".repeat(Math.max(1, Math.ceil(player.heat)));
+        statusEl.textContent = mission;
+      }
+
+      function castRay(angle) {
+        const sin = Math.sin(angle);
+        const cos = Math.cos(angle);
+
+        for (let depth = 0; depth < MAX_DEPTH; depth += 2) {
+          const x = player.x + cos * depth;
+          const y = player.y + sin * depth;
+          if (isWall(x, y)) {
+            const shade = 1 - depth / MAX_DEPTH;
+            return { depth, x, y, shade };
+          }
+        }
+
+        return { depth: MAX_DEPTH, x: player.x, y: player.y, shade: 0 };
+      }
+
+      function projectSprite(entity) {
+        const dx = entity.x - player.x;
+        const dy = entity.y - player.y;
+        const distance = Math.hypot(dx, dy);
+        const angleToSprite = Math.atan2(dy, dx) - player.angle;
+        const normalized = Math.atan2(Math.sin(angleToSprite), Math.cos(angleToSprite));
+
+        if (Math.abs(normalized) > FOV * 0.7 || distance < 8) return null;
+
+        const size = clamp((CELL * 480) / distance, 12, 260);
+        const screenX = canvas.width / 2 + (normalized / (FOV / 2)) * (canvas.width / 2);
+        const screenY = canvas.height / 2 + 120 / Math.max(distance / CELL, 0.8);
+
+        return { distance, screenX, screenY, size };
+      }
+
+      function renderScene() {
+        const horizon = canvas.height * 0.45;
+        const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+        sky.addColorStop(0, "#0f172a");
+        sky.addColorStop(1, "#1d4ed8");
+        ctx.fillStyle = sky;
+        ctx.fillRect(0, 0, canvas.width, horizon);
+
+        const ground = ctx.createLinearGradient(0, horizon, 0, canvas.height);
+        ground.addColorStop(0, "#334155");
+        ground.addColorStop(1, "#111827");
+        ctx.fillStyle = ground;
+        ctx.fillRect(0, horizon, canvas.width, canvas.height - horizon);
+
+        const rayCount = canvas.width;
+        const depths = new Array(rayCount);
+
+        for (let column = 0; column < rayCount; column += 1) {
+          const rayAngle = player.angle - FOV / 2 + (column / rayCount) * FOV;
+          const hit = castRay(rayAngle);
+          const correctedDepth = hit.depth * Math.cos(rayAngle - player.angle);
+          depths[column] = correctedDepth;
+          const wallHeight = clamp((CELL * 780) / Math.max(correctedDepth, 1), 0, canvas.height * 1.4);
+          const top = horizon - wallHeight * 0.65;
+          const alpha = clamp(hit.shade, 0.16, 1);
+          const hue = 200 + ((Math.floor(hit.x / CELL) + Math.floor(hit.y / CELL)) % 2) * 18;
+          ctx.fillStyle = `hsla(${hue}, 60%, ${30 + alpha * 22}%, 1)`;
+          ctx.fillRect(column, top, 1.5, wallHeight);
+          ctx.fillStyle = `rgba(255,255,255,${alpha * 0.05})`;
+          ctx.fillRect(column, top + 4, 1, Math.max(4, wallHeight * 0.18));
+        }
+
+        const sprites = [];
+
+        for (const car of traffic) sprites.push({ ...car, type: "traffic" });
+        for (const cop of police) sprites.push({ ...cop, type: "police" });
+        for (const ped of pedestrians) sprites.push({ ...ped, type: "pedestrian" });
+        if (currentPickup?.active) sprites.push({ ...currentPickup, type: "pickup" });
+        if (destination?.active) sprites.push({ ...destination, type: "destination" });
+        for (const particle of state.particles) sprites.push({ ...particle, type: "particle" });
+
+        sprites
+          .map((sprite) => ({ sprite, projection: projectSprite(sprite) }))
+          .filter(({ projection }) => projection)
+          .sort((a, b) => b.projection.distance - a.projection.distance)
+          .forEach(({ sprite, projection }) => {
+            const x = Math.floor(projection.screenX);
+            const size = projection.size;
+            const left = Math.floor(x - size / 2);
+            const right = Math.floor(x + size / 2);
+            const occluded = left >= 0 && left < depths.length && projection.distance > depths[clamp(left, 0, depths.length - 1)] + 12;
+            if (occluded) return;
+
+            let color = "#fff";
+            if (sprite.type === "traffic") color = sprite.color;
+            if (sprite.type === "pickup") color = sprite.color;
+            if (sprite.type === "destination") color = "#4ade80";
+            if (sprite.type === "pedestrian") color = sprite.color;
+            if (sprite.type === "particle") color = sprite.color;
+            if (sprite.type === "police") color = Math.sin(sprite.siren) > 0 ? "#60a5fa" : "#fb7185";
+
+            ctx.save();
+            ctx.globalAlpha = sprite.type === "particle" ? sprite.life / sprite.maxLife : 1;
+            if (sprite.type === "destination") {
+              ctx.strokeStyle = color;
+              ctx.lineWidth = 6;
+              ctx.beginPath();
+              ctx.arc(x, projection.screenY + size * 0.2, size * 0.32, 0, TAU);
+              ctx.stroke();
+            } else if (sprite.type === "pedestrian") {
+              ctx.fillStyle = color;
+              ctx.beginPath();
+              ctx.arc(x, projection.screenY - size * 0.15, size * 0.18, 0, TAU);
+              ctx.fill();
+              ctx.fillRect(x - size * 0.1, projection.screenY - size * 0.05, size * 0.2, size * 0.5);
+            } else {
+              ctx.fillStyle = color;
+              ctx.fillRect(x - size * 0.25, projection.screenY - size * 0.28, size * 0.5, size * 0.56);
+              ctx.fillStyle = "rgba(15,23,42,0.75)";
+              ctx.fillRect(x - size * 0.16, projection.screenY - size * 0.18, size * 0.32, size * 0.24);
+            }
+            ctx.restore();
+          });
+
+        ctx.fillStyle = "rgba(255,255,255,0.07)";
+        ctx.fillRect(0, canvas.height - 118, canvas.width, 118);
+        ctx.fillStyle = "rgba(255,255,255,0.1)";
+        ctx.fillRect(canvas.width / 2 - 60, canvas.height - 104, 120, 12);
+        const speedRatio = clamp(Math.abs(player.speed) / 260, 0, 1);
+        ctx.fillStyle = player.speed > 180 ? "#f97316" : "#38bdf8";
+        ctx.fillRect(canvas.width / 2 - 60, canvas.height - 104, 120 * speedRatio, 12);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.35)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(canvas.width / 2 - 8, canvas.height / 2);
+        ctx.lineTo(canvas.width / 2 + 8, canvas.height / 2);
+        ctx.moveTo(canvas.width / 2, canvas.height / 2 - 8);
+        ctx.lineTo(canvas.width / 2, canvas.height / 2 + 8);
+        ctx.stroke();
+
+        if (state.showMap) renderMinimap();
+        if (SHOW_RAYS && state.showMap) renderRays();
+
+        if (state.flash > 0) {
+          ctx.fillStyle = `rgba(251, 113, 133, ${state.flash * 1.8})`;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        if (player.health <= 0) {
+          ctx.fillStyle = "rgba(2, 6, 23, 0.72)";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = "#fecaca";
+          ctx.font = "700 68px Inter, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText("WASTED", canvas.width / 2, canvas.height / 2 - 20);
+          ctx.fillStyle = "#e2e8f0";
+          ctx.font = "24px Inter, sans-serif";
+          ctx.fillText("R キーでリスタート", canvas.width / 2, canvas.height / 2 + 36);
+        }
+      }
+
+      function renderMinimap() {
+        const scale = 8;
+        const mapX = 20;
+        const mapY = 20;
+        ctx.save();
+        ctx.fillStyle = "rgba(2,6,23,0.78)";
+        ctx.fillRect(mapX - 8, mapY - 8, cityMap[0].length * scale + 16, cityMap.length * scale + 16);
+
+        for (let row = 0; row < cityMap.length; row += 1) {
+          for (let col = 0; col < cityMap[row].length; col += 1) {
+            ctx.fillStyle = cityMap[row][col] === "1" ? "#334155" : "#0f172a";
+            ctx.fillRect(mapX + col * scale, mapY + row * scale, scale - 1, scale - 1);
+          }
+        }
+
+        for (const car of traffic) {
+          ctx.fillStyle = car.color;
+          ctx.fillRect(mapX + (car.x / CELL) * scale - 2, mapY + (car.y / CELL) * scale - 2, 4, 4);
+        }
+
+        for (const cop of police) {
+          ctx.fillStyle = "#f8fafc";
+          ctx.fillRect(mapX + (cop.x / CELL) * scale - 2, mapY + (cop.y / CELL) * scale - 2, 4, 4);
+        }
+
+        if (currentPickup?.active) {
+          ctx.fillStyle = currentPickup.color;
+          ctx.beginPath();
+          ctx.arc(mapX + (currentPickup.x / CELL) * scale, mapY + (currentPickup.y / CELL) * scale, 4, 0, TAU);
+          ctx.fill();
+        }
+
+        if (destination?.active) {
+          ctx.strokeStyle = "#4ade80";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(mapX + (destination.x / CELL) * scale, mapY + (destination.y / CELL) * scale, 5, 0, TAU);
+          ctx.stroke();
+        }
+
+        ctx.save();
+        ctx.translate(mapX + (player.x / CELL) * scale, mapY + (player.y / CELL) * scale);
+        ctx.rotate(player.angle);
+        ctx.fillStyle = "#38bdf8";
+        ctx.beginPath();
+        ctx.moveTo(6, 0);
+        ctx.lineTo(-4, -4);
+        ctx.lineTo(-4, 4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+        ctx.restore();
+      }
+
+      function renderRays() {
+        const scale = 8;
+        const mapX = 20;
+        const mapY = 20;
+        ctx.strokeStyle = "rgba(56,189,248,0.18)";
+        for (let i = 0; i < 80; i += 1) {
+          const angle = player.angle - FOV / 2 + (i / 80) * FOV;
+          const hit = castRay(angle);
+          ctx.beginPath();
+          ctx.moveTo(mapX + (player.x / CELL) * scale, mapY + (player.y / CELL) * scale);
+          ctx.lineTo(mapX + (hit.x / CELL) * scale, mapY + (hit.y / CELL) * scale);
+          ctx.stroke();
+        }
+      }
+
+      function update(dt) {
+        if (player.health <= 0) {
+          if (keys.has("r")) resetGame();
+          updateStatus();
+          return;
+        }
+
+        state.flash = Math.max(0, state.flash - dt);
+        drivePlayer(dt);
+        updateTraffic(dt);
+        updatePolice(dt);
+        updatePedestrians(dt);
+        updateMission(dt);
+        updateParticles(dt);
+        updateStatus();
+      }
+
+      let lastFrame = performance.now();
+      function frame(now) {
+        const dt = Math.min((now - lastFrame) / 1000, 1 / 30);
+        lastFrame = now;
+        update(dt);
+        renderScene();
+        requestAnimationFrame(frame);
+      }
+
+      window.addEventListener("keydown", (event) => {
+        const key = event.key.toLowerCase();
+        keys.add(key);
+        if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(key)) {
+          event.preventDefault();
+        }
+        if (key === "m") state.showMap = !state.showMap;
+        if (key === " ") {
+          player.heat = clamp(player.heat + 0.12, 0, 5);
+          emitParticles(player.x + Math.cos(player.angle) * 20, player.y + Math.sin(player.angle) * 20, "#7dd3fc", 6);
+        }
+      });
+
+      window.addEventListener("keyup", (event) => {
+        keys.delete(event.key.toLowerCase());
+      });
+
+      resetGame();
+      updateStatus();
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>
